@@ -8,7 +8,7 @@
     written by Jens Mönig
     jens@moenig.org
 
-    Copyright (C) 2010-2024 by Jens Mönig
+    Copyright (C) 2010-2026 by Jens Mönig
 
     This file is part of Snap!.
 
@@ -62,8 +62,9 @@
         (6) development and user modes
         (7) turtle graphics
         (8) supporting high-resolution "retina" screens
-        (9 animations
-        (10) minifying morphic.js
+        (9) global zoom
+        (10) animations
+        (11) minifying morphic.js
     VIII. acknowledgements
     IX. contributors
 
@@ -490,6 +491,19 @@
     event method has an additional optional parameter indicating the
     currently pressed mouse button, which is either 'left' or 'right'.
     You can use this to let users interact with 3D environments.
+
+    Mouse move and click events are only triggered when and as long as the
+    mouse pointer is within a morph's bounds. If you wish to confine and
+    retain mouse interaction to a particular morph while a mouse button is
+    pressed you can call the morph's
+    
+        lockMouseFocus()
+
+    method, preferrably in one of its mouseDown methods. Afterwards the
+    ensuing mouse events will be routed to the locked morph even after the
+    mouse pointer has left its bounds, and the mouseLeave event will not
+    occur until the mouse button is released again. This is useful for
+    creating sliders and handle widgets for resizing, moving, rotating etc.
 
     The
 
@@ -1213,7 +1227,22 @@
     stage (high-resolution) into a sprite-costume (normal resolution).
 
 
-    (9) animations
+    (9) global zoom
+    ----------------
+    For better accessibility it can be useful to support magnifying a morphic
+    application to different, individual zoom levels. By default the global
+    
+        ZOOM
+    
+    factor is set to the number 1. It can be changed using the Wold's
+
+        zoom(factor)
+
+    method. The zoom level can only be used for magnification, i.e. it only
+    supports levels greater than or equals 1.
+
+
+    (10) animations
     ---------------
     Animations handle gradual transitions between one state and another over a
     period of time. Transition effects can be specified using easing functions.
@@ -1260,8 +1289,17 @@
 
     method.
 
+    Animations can further be used to schedule a function execution dynamically
+    once a condition has been met, avoiding the need to specify an event or
+    a promise. A syntactic shortcut for single-time conditional scheduling
+    exists in the WorldMorph's
 
-    (10) minifying morphic.js
+        once()
+
+    method.
+
+
+    (11) minifying morphic.js
     -------------------------
     Coming from Smalltalk and being a Squeaker at heart I am a huge fan
     of browsing the code itself to make sense of it. Therefore I have
@@ -1338,9 +1376,10 @@
 
 /*jshint esversion: 11, bitwise: false*/
 
-var morphicVersion = '2024-October-09';
+var morphicVersion = '2026-May-11';
 var modules = {}; // keep track of additional loaded modules
 var useBlurredShadows = true;
+var ZOOM = 1;
 
 const ZERO = new Point();
 const BLACK = new Color();
@@ -1511,13 +1550,16 @@ function newCanvas(extentPoint, nonRetina, recycleMe) {
     // being shared among Morphs (dataset property "morphicShare")
     var canvas, ext;
     nonRetina = nonRetina || false;
-    ext = (extentPoint ||
-            (recycleMe ? new Point(recycleMe.width, recycleMe.height)
-                : new Point(0, 0))).ceil();
+    if (extentPoint) {
+        ext = extentPoint.ceil();
+    } else {
+        ext = recycleMe ? new Point(recycleMe.width, recycleMe.height)
+            : new Point();
+    }
     if (recycleMe &&
-            !recycleMe.dataset.morphicShare &&
-            (recycleMe.isRetinaEnabled || false) !== nonRetina &&
-            ext.x === recycleMe.width && ext.y === recycleMe.height
+        !recycleMe.dataset.morphicShare &&
+        (recycleMe.isRetinaEnabled || false) !== nonRetina &&
+        ext.x === recycleMe.width && ext.y === recycleMe.height
     ) {
         canvas = recycleMe;
         canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
@@ -1743,6 +1785,17 @@ function enableRetinaSupport() {
     // support retina mode as implemented here).
     // therefore - to ensure crisp fonts - use the ceiling of whatever
     // the devicePixelRatio is. This needs more memory, but looks nicer.
+
+    // [Jens]: As of winter 2025 non-integer devicePixelRatios are handled
+    // gracefully by all browsers tested, but now I'm adding global Morphic
+    // ZOOM, which requires avoiding subpixel antialiasing blitting artifacts
+    // by snapping clip rectangles to integer coordinates representing physical
+    // pixels in the "rectangle >> spread()" method. We could take the "retina"
+    // scaling ratio into account, but since we want to support both hi-res
+    // and normal canvasses inside a morphic world, we would need to check
+    // each canvas surface for its particular ratio property whenever we're
+    // rendering something else onto it, which would slow things down
+    // significantly. Hence I'm leaving the ratio-clipping to the ceiling in.
 
         originalDevicePixelRatio = Math.ceil(window.devicePixelRatio),
 
@@ -2924,9 +2977,11 @@ Rectangle.prototype.round = function () {
 };
 
 Rectangle.prototype.spread = function () {
-    // round me by applying floor() to my origin and ceil() to my corner
-    // avoids artefacts on retina displays
-    return this.origin.floor().corner(this.corner.ceil());
+    // tweak me so rendering me on the world canvas avoids subpixel
+    // artifacts from antialiasing by making sure my measurements
+    // snap to physical pixels and not in between
+    return this.origin.multiplyBy(ZOOM).floor().divideBy(ZOOM)
+        .corner(this.corner.multiplyBy(ZOOM).ceil().divideBy(ZOOM));
 };
 
 Rectangle.prototype.amountToTranslateWithin = function (aRect) {
@@ -3879,6 +3934,7 @@ Morph.prototype.penTrails = function () {
     // obtained canvas will be around at the next display cycle,
     // so they might also wish to set the receiver's "isCachingImage"
     // property to "true".
+    this.isCachingImage = true;
     return this.getImage();
 };
 
@@ -4765,6 +4821,17 @@ Morph.prototype.escalateEvent = function (functionName, arg) {
     }
 };
 
+Morph.prototype.lockMouseFocus = function () {
+    // while the mouse button is pressed let me handle mouseMove events
+    // and the next mouseUp event, and don't fire the mouseLeave event.
+    // Use for widgets that are dragged around, e.g. resize handles,
+    // dials, sliders etc.
+    var hand = this.world().hand;
+    hand.inputTarget = this;
+    hand.clickTarget = this;
+    hand.mouseOverList = hand.mouseOverList.concat(this.allParents());
+};
+
 // Morph eval:
 
 Morph.prototype.evaluateString = function (code) {
@@ -4876,6 +4943,7 @@ HandleMorph.prototype.init = function (
     this.target = target || null;
     this.minExtent = new Point(minX || 0, minY || 0);
     this.inset = new Point(insetX || 0, insetY || insetX || 0);
+    this.offset = null;
     this.type =  type || 'resize'; // also: 'move', 'moveCenter', 'movePivot'
     this.isHighlighted = false;
     HandleMorph.uber.init.call(this);
@@ -5045,60 +5113,6 @@ HandleMorph.prototype.renderHandleOn = function (
     }
 };
 
-// HandleMorph stepping:
-
-HandleMorph.prototype.step = null;
-
-HandleMorph.prototype.mouseDownLeft = function (pos) {
-    var world = this.root(),
-        offset;
-
-    if (!this.target) {
-        return null;
-    }
-    if (this.type.indexOf('move') === 0) {
-        offset = pos.subtract(this.center());
-    } else {
-        offset = pos.subtract(this.bounds.origin);
-    }
-
-    this.step = () => {
-        var newPos, newExt;
-        if (world.hand.mouseButton) {
-            newPos = world.hand.bounds.origin.copy().subtract(offset);
-            if (this.type === 'resize') {
-                newExt = newPos.add(
-                    this.extent().add(this.inset)
-                ).subtract(this.target.bounds.origin);
-                newExt = newExt.max(this.minExtent);
-                this.target.setExtent(newExt);
-
-                this.setPosition(
-                    this.target.bottomRight().subtract(
-                        this.extent().add(this.inset)
-                    )
-                );
-            } else if (this.type === 'moveCenter') {
-                this.target.setCenter(newPos);
-            } else if (this.type === 'movePivot') {
-                this.target.setPivot(newPos);
-                this.setCenter(this.target.rotationCenter());
-            } else { // type === 'move'
-                this.target.setPosition(
-                    newPos.subtract(this.target.extent())
-                        .add(this.extent())
-                );
-            }
-        } else {
-            this.step = null;
-        }
-    };
-
-    if (!this.target.step) {
-        this.target.step = nop;
-    }
-};
-
 // HandleMorph dragging and dropping:
 
 HandleMorph.prototype.rootForGrab = function () {
@@ -5115,6 +5129,47 @@ HandleMorph.prototype.mouseEnter = function () {
 HandleMorph.prototype.mouseLeave = function () {
     this.isHighlighted = false;
     this.changed();
+};
+
+HandleMorph.prototype.mouseDownLeft = function (pos) {
+    if (!this.target) {
+        return null;
+    }
+    if (this.type.indexOf('move') === 0) {
+        this.offset = pos.subtract(this.center());
+    } else {
+        this.offset = pos.subtract(this.bounds.origin);
+    }
+    this.lockMouseFocus();
+};
+
+HandleMorph.prototype.mouseMove = function (pos) {
+    var newPos, newExt;
+
+    newPos = pos.subtract(this.offset);
+    if (this.type === 'resize') {
+        newExt = newPos.add(
+            this.extent().add(this.inset)
+        ).subtract(this.target.bounds.origin);
+        newExt = newExt.max(this.minExtent);
+        this.target.setExtent(newExt);
+
+        this.setPosition(
+            this.target.bottomRight().subtract(
+                this.extent().add(this.inset)
+            )
+        );
+    } else if (this.type === 'moveCenter') {
+        this.target.setCenter(newPos);
+    } else if (this.type === 'movePivot') {
+        this.target.setPivot(newPos);
+        this.setCenter(this.target.rotationCenter());
+    } else { // type === 'move'
+        this.target.setPosition(
+            newPos.subtract(this.target.extent())
+                .add(this.extent())
+        );
+    }
 };
 
 // HandleMorph menu:
@@ -5535,6 +5590,8 @@ GrayPaletteMorph.prototype.render = function (ctx) {
     this.choice = BLACK;
     gradient = ctx.createLinearGradient(0, 0, ext.x, ext.y);
     gradient.addColorStop(0, 'black');
+    gradient.addColorStop(0.1, 'black');
+    gradient.addColorStop(0.9, 'white');
     gradient.addColorStop(1, 'white');
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, ext.x, ext.y);
@@ -5794,6 +5851,9 @@ CursorMorph.prototype.processInput = function (event) {
             hasE = false,
             result = '',
             i, ch, valid;
+        if (content === '$' || content.startsWith('$_')) { // support selectors
+            return content;
+        }
         for (i = 0; i < content.length; i += 1) {
             ch = content.charAt(i);
             valid = (
@@ -6031,44 +6091,14 @@ BoxMorph.prototype.render = function (ctx) {
 BoxMorph.prototype.outlinePath = function (ctx, corner, inset) {
     var w = this.width(),
         h = this.height(),
-        radius = Math.min(corner, (Math.min(w, h) - inset) / 2),
-        offset = radius + inset;
+        radius = Math.min(corner, (Math.min(w, h) - inset) / 2);
 
-    // top left:
-    ctx.arc(
-        offset,
-        offset,
-        radius,
-        radians(-180),
-        radians(-90),
-        false
-    );
-    // top right:
-    ctx.arc(
-        w - offset,
-        offset,
-        radius,
-        radians(-90),
-        radians(-0),
-        false
-    );
-    // bottom right:
-    ctx.arc(
-        w - offset,
-        h - offset,
-        radius,
-        radians(0),
-        radians(90),
-        false
-    );
-    // bottom left:
-    ctx.arc(
-        offset,
-        h - offset,
-        radius,
-        radians(90),
-        radians(180),
-        false
+    ctx.roundRect(
+        inset,
+        inset,
+        w - (inset * 2),
+        h - (inset * 2),
+        radius
     );
 };
 
@@ -6523,17 +6553,18 @@ DialMorph.prototype = new Morph();
 DialMorph.prototype.constructor = DialMorph;
 DialMorph.uber = Morph.prototype;
 
-function DialMorph(min, max, value, tick, radius) {
-    this.init(min, max, value, tick, radius);
+function DialMorph(min, max, value, tick, radius, bearings = 'compass') {
+    this.init(min, max, value, tick, radius, bearings);
 }
 
-DialMorph.prototype.init = function (min, max, value, tick, radius) {
+DialMorph.prototype.init = function (min, max, value, tick, radius, bearings) {
     this.target = null;
     this.action = null;
     this.min = min || 0;
     this.max = max || 360;
     this.value = Math.max(this.min, (value || 0) % this.max);
     this.tick = tick || 15;
+    this.bearings = bearings || 'compass'; // or: 'math'
     this.fillColor = null;
 
     DialMorph.uber.init.call(this);
@@ -6564,16 +6595,17 @@ DialMorph.prototype.setValue = function (value, snapToTick, noUpdate) {
 };
 
 DialMorph.prototype.getValueOf = function (point) {
-    var range = this.max - this.min,
+    var isCompass = (this.bearings === 'compass'),
+        range = this.max - this.min,
     	center = this.center(),
         deltaX = point.x - center.x,
-        deltaY = center.y - point.y,
+        deltaY = isCompass ? center.y - point.y : point.y - center.y,
         angle = Math.abs(deltaX) < 0.001 ? (deltaY < 0 ? 90 : 270)
-                : Math.round(
+            : Math.round(
                 (deltaX >= 0 ? 0 : 180)
                     - (Math.atan(deltaY / deltaX) * 57.2957795131)
-        		),
-        value = angle + 90 % 360,
+            ),
+        value = isCompass ? angle + 90 % 360 : angle % 360,
         ratio = value / 360;
     return range * ratio + this.min;
 };
@@ -6585,13 +6617,19 @@ DialMorph.prototype.setExtent = function (aPoint) {
 };
 
 DialMorph.prototype.render = function (ctx) {
-    var i, angle, x1, y1, x2, y2,
+    var i, angle, x1, y1, x2, y2, ta,
         light = this.color.lighter().toString(),
         range = this.max - this.min,
         ticks = range / this.tick,
         face = this.radius * 0.75,
         inner = face * 0.85,
         outer = face * 0.95;
+
+    if (this.bearings === 'compass') {
+        angle = (this.value - this.min) * (Math.PI * 2) / range - Math.PI / 2;
+    } else { // 'math'
+        angle = (this.value - this.min) * (Math.PI * -2) / range;
+    }
 
     // draw a light border:
     ctx.fillStyle = light;
@@ -6622,16 +6660,15 @@ DialMorph.prototype.render = function (ctx) {
     ctx.fill();
 
     // fill value
-    angle = (this.value - this.min) * (Math.PI * 2) / range - Math.PI / 2;
     ctx.fillStyle = (this.fillColor || this.color.darker()).toString();
     ctx.beginPath();
     ctx.arc(
         this.radius,
         this.radius,
         face,
-        Math.PI / -2,
+        this.bearings === 'compass' ? Math.PI / -2 : 0,
         angle,
-        false
+        this.bearings === 'math'
     );
     ctx.lineTo(this.radius, this.radius);
     ctx.closePath();
@@ -6641,12 +6678,12 @@ DialMorph.prototype.render = function (ctx) {
     ctx.strokeStyle = new Color(35, 35, 35).toString();
     ctx.lineWidth = 1;
     for (i = 0; i < ticks; i += 1) {
-        angle = (i - 3) * (Math.PI * 2) / ticks - Math.PI / 2;
+        ta = (i - 3) * (Math.PI * 2) / ticks - Math.PI / 2;
         ctx.beginPath();
-        x1 = this.radius + Math.cos(angle) * inner;
-        y1 = this.radius + Math.sin(angle) * inner;
-        x2 = this.radius + Math.cos(angle) * outer;
-        y2 = this.radius + Math.sin(angle) * outer;
+        x1 = this.radius + Math.cos(ta) * inner;
+        y1 = this.radius + Math.sin(ta) * inner;
+        x2 = this.radius + Math.cos(ta) * outer;
+        y2 = this.radius + Math.sin(ta) * outer;
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
@@ -6670,7 +6707,6 @@ DialMorph.prototype.render = function (ctx) {
     // draw the inner hand:
     ctx.strokeStyle = 'black';
     ctx.lineWidth = 1;
-    angle = (this.value - this.min) * (Math.PI * 2) / range - Math.PI / 2;
     outer = face * 0.8;
     x1 = this.radius + Math.cos(angle) * inner;
     y1 = this.radius + Math.sin(angle) * inner;
@@ -6699,7 +6735,6 @@ DialMorph.prototype.render = function (ctx) {
     ctx.stroke();
 
     // draw the outer hand:
-    angle = (this.value - this.min) * (Math.PI * 2) / range - Math.PI / 2;
     x1 = this.radius + Math.cos(angle) * face;
     y1 = this.radius + Math.sin(angle) * face;
     x2 = this.radius + Math.cos(angle) * (this.radius - 1);
@@ -6735,23 +6770,17 @@ DialMorph.prototype.render = function (ctx) {
     ctx.fill();
 };
 
-// DialMorph stepping:
-
-DialMorph.prototype.step = null;
+// DialMorph events:
 
 DialMorph.prototype.mouseDownLeft = function (pos) {
-    var world = this.root();
+    this.lockMouseFocus();
+};
 
-    this.step = () => {
-        if (world.hand.mouseButton) {
-            this.setValue(
-            	this.getValueOf(world.hand.bounds.origin),
-             	world.currentKey !== 16 // snap to tick
-            );
-        } else {
-            this.step = null;
-        }
-    };
+DialMorph.prototype.mouseMove = function (pos) {
+    this.setValue(
+        this.getValueOf(pos),
+        this.world().currentKey !== 16 // snap to tick
+    );
 };
 
 // DialMorph menu:
@@ -6843,75 +6872,15 @@ CircleBoxMorph.prototype.autoOrientation = function () {
 };
 
 CircleBoxMorph.prototype.render = function (ctx) {
-    var w = this.width(),
-        h = this.height(),
-        radius;
-
     if (this.autoOrient) {
         this.autoOrientation();
     }
+    var w = this.width(),
+        h = this.height(),
+        radius = this.orientation === 'vertical' ? w / 2 : h / 2;
 
-    if (this.orientation === 'vertical') {
-        radius = w / 2;
-        ctx.beginPath();
-
-        // top semi-circle
-        ctx.arc(
-            radius,
-            radius,
-            radius,
-            radians(180),
-            radians(0),
-            false
-        );
-
-        // right line
-        ctx.lineTo(
-            w,
-            h - radius
-        );
-
-        // bottom semi-circle
-        ctx.arc(
-            radius,
-            h - radius,
-            radius,
-            radians(0),
-            radians(180),
-            false
-        );
-
-    } else {
-        radius = h / 2;
-        ctx.beginPath();
-
-        // left semi-circle
-        ctx.arc(
-            radius,
-            radius,
-            radius,
-            radians(90),
-            radians(-90),
-            false
-        );
-
-        // top line
-        ctx.lineTo(
-            w - radius,
-            0
-        );
-
-        // right semi-circle
-        ctx.arc(
-            w - radius,
-            radius,
-            radius,
-            radians(-90),
-            radians(90),
-            false
-        );
-    }
-    ctx.closePath();
+    ctx.beginPath();
+    ctx.roundRect(0, 0, w, h, radius);
     ctx.fillStyle = this.color.toString();
     ctx.fill();
 };
@@ -7142,9 +7111,9 @@ SliderButtonMorph.prototype.mouseClickLeft = function () {
     this.rerender();
 };
 
-SliderButtonMorph.prototype.mouseMove = function () {
-    // prevent my parent from getting picked up
-    nop();
+SliderButtonMorph.prototype.mouseMove = function (pos) {
+    // delegate event to the slider
+    this.escalateEvent('mouseMove', pos);
 };
 
 // SliderMorph ///////////////////////////////////////////////////
@@ -7448,49 +7417,43 @@ SliderMorph.prototype.numericalSetters = function () {
     return list;
 };
 
-// SliderMorph stepping:
-
-SliderMorph.prototype.step = null;
+// SliderMorph events:
 
 SliderMorph.prototype.mouseDownLeft = function (pos) {
-    var world;
-
-    if (!this.button.bounds.containsPoint(pos)) {
-        this.offset = new Point(); // return null;
-    } else {
+    if (this.button.bounds.containsPoint(pos)) {
         this.offset = pos.subtract(this.button.bounds.origin);
+    } else {
+        this.offset = new Point();
+        this.button.userState = 'pressed';
+        this.button.rerender();
     }
-    world = this.root();
+    this.button.lockMouseFocus();
+    this.mouseMove(pos);
+};
 
-    this.step = () => {
-        var mousePos, newX, newY;
-        if (world.hand.mouseButton) {
-            mousePos = world.hand.bounds.origin;
-            if (this.orientation === 'vertical') {
-                newX = this.button.bounds.origin.x;
-                newY = Math.max(
-                    Math.min(
-                        mousePos.y - this.offset.y,
-                        this.bottom() - this.button.height()
-                    ),
-                    this.top()
-                );
-            } else {
-                newY = this.button.bounds.origin.y;
-                newX = Math.max(
-                    Math.min(
-                        mousePos.x - this.offset.x,
-                        this.right() - this.button.width()
-                    ),
-                    this.left()
-                );
-            }
-            this.button.setPosition(new Point(newX, newY));
-            this.updateValue();
-        } else {
-            this.step = null;
-        }
-    };
+SliderMorph.prototype.mouseMove = function (pos) {
+    var newX, newY;
+    if (this.orientation === 'vertical') {
+        newX = this.button.bounds.origin.x;
+        newY = Math.max(
+            Math.min(
+                pos.y - this.offset.y,
+                this.bottom() - this.button.height()
+            ),
+            this.top()
+        );
+    } else {
+        newY = this.button.bounds.origin.y;
+        newX = Math.max(
+            Math.min(
+                pos.x - this.offset.x,
+                this.right() - this.button.width()
+            ),
+            this.left()
+        );
+    }
+    this.button.setPosition(new Point(newX, newY));
+    this.updateValue();
 };
 
 // MouseSensorMorph ////////////////////////////////////////////////////
@@ -7596,7 +7559,7 @@ InspectorMorph.prototype.init = function (target) {
     // override inherited properties:
     this.isDraggable = true;
     this.border = 1;
-    this.edge = MorphicPreferences.isFlat ? 1 : 5;
+    this.edge = MorphicPreferences.isFlat ? 3 : 5;
     this.color = new Color(60, 60, 60);
     this.borderColor = new Color(95, 95, 95);
     this.fps = 25;
@@ -8165,6 +8128,21 @@ MenuMorph.prototype.addLine = function (width) {
     this.items.push([0, width || 1]);
 };
 
+MenuMorph.prototype.addSectionLabel = function (labelText) {
+    this.items.push(new StringMorph(
+        localize(labelText),
+        (this.fontSize || MorphicPreferences.menuFontSize) * 0.85,
+        null, // fontStyle
+        true, // bold
+        null, // italic
+        null, // isNumeric
+        null, // shadowOffset
+        null, // shadowColor
+        new Color(170, 170, 170),
+        null // fontName
+    ));
+};
+
 MenuMorph.prototype.createLabel = function () {
     var text;
     if (this.label !== null) {
@@ -8203,7 +8181,7 @@ MenuMorph.prototype.createItems = function () {
     this.children.forEach(m => m.destroy());
     this.children = [];
     if (!this.isListContents) {
-        this.edge = MorphicPreferences.isFlat ? 0 : 5;
+        this.edge = MorphicPreferences.isFlat ? 3 : 5;
         this.border = MorphicPreferences.isFlat ? 1 : 2;
     }
     this.color = WHITE;
@@ -8226,6 +8204,7 @@ MenuMorph.prototype.createItems = function () {
     this.items.forEach(tuple => {
         isLine = false;
         if (tuple instanceof StringFieldMorph ||
+                tuple instanceof StringMorph ||
                 tuple instanceof ColorPickerMorph ||
                 tuple instanceof SliderMorph ||
                 tuple instanceof DialMorph) {
@@ -8253,8 +8232,13 @@ MenuMorph.prototype.createItems = function () {
         }
         if (isLine) {
             y += 1;
+        } else if (item instanceof StringMorph) {
+            y += item.height() / 4;
         }
-        item.setPosition(new Point(x, y));
+        item.setPosition(new Point(
+            item instanceof StringMorph ? x + 4 : x,
+            y
+        ));
         this.add(item);
         y = y + item.height();
         if (isLine) {
@@ -8283,6 +8267,7 @@ MenuMorph.prototype.maxWidth = function () {
                     (item.shortcut ? item.shortcut.width() + 4 : 0)
             );
         } else if ((item instanceof StringFieldMorph) ||
+                (item instanceof StringMorph) ||
                 (item instanceof ColorPickerMorph) ||
                 (item instanceof SliderMorph) ||
                 (item instanceof DialMorph)) {
@@ -11286,6 +11271,8 @@ HandMorph.prototype.init = function (aWorld) {
     this.mouseOverList = [];
     this.mouseOverBounds = [];
     this.morphToGrab = null;
+    this.inputTarget = null;
+    this.clickTarget = null;
     this.grabPosition = null;
     this.grabOrigin = null;
     this.temporaries = [];
@@ -11483,7 +11470,7 @@ HandMorph.prototype.processMouseDown = function (event) {
         this.setPosition(new Point(
             event.pageX - posInDocument.x,
             event.pageY - posInDocument.y
-        ));
+        ).divideBy(ZOOM));
     }
 
     // process the actual event
@@ -11494,8 +11481,11 @@ HandMorph.prototype.processMouseDown = function (event) {
     if (this.children.length !== 0) {
         this.drop();
         this.mouseButton = null;
+        this.inputTarget = null;
+        this.clickTarget = null;
     } else {
         morph = this.morphAtPointer();
+        this.clickTarget = morph;
         if (this.world.activeMenu) {
             if (!contains(
                     morph.allParents(),
@@ -11512,7 +11502,9 @@ HandMorph.prototype.processMouseDown = function (event) {
             }
         }
         if (this.world.cursor) {
-            if (morph !== this.world.cursor.target) {
+            if (morph !== this.world.cursor.target &&
+                    !morph.parentThatIsA(MenuItemMorph)
+            ) {
                 this.world.stopEditing();
             }
         }
@@ -11541,7 +11533,7 @@ HandMorph.prototype.processTouchStart = function (event) {
         this.touchStartPosition = new Point(
             event.touches[0].pageX,
             event.touches[0].pageY
-        );
+        ).divideBy(ZOOM);
         this.touchHoldTimeout = setInterval( // simulate mouseRightClick
             () => {
                 this.processMouseDown({button: 2});
@@ -11558,7 +11550,10 @@ HandMorph.prototype.processTouchStart = function (event) {
 };
 
 HandMorph.prototype.processTouchMove = function (event) {
-    var pos = new Point(event.touches[0].pageX, event.touches[0].pageY);
+    var pos = new Point(
+            event.touches[0].pageX,
+            event.touches[0].pageY
+        ).divideBy(ZOOM);
     MorphicPreferences.isTouchDevice = true;
     if (this.touchStartPosition.distanceTo(pos) <
             MorphicPreferences.grabThreshold) {
@@ -11579,11 +11574,10 @@ HandMorph.prototype.processTouchEnd = function (event) {
 };
 
 HandMorph.prototype.processMouseUp = function () {
-    var morph = this.morphAtPointer(),
+    var morph = this.inputTarget || this.morphAtPointer(),
         context,
         contextMenu,
         expectedClick;
-
     this.destroyTemporaries();
     if (this.children.length !== 0) {
         this.drop();
@@ -11608,9 +11602,19 @@ HandMorph.prototype.processMouseUp = function () {
         while (!morph[expectedClick]) {
             morph = morph.parent;
         }
-        morph[expectedClick](this.bounds.origin);
+        if (this.clickTarget && this.clickTarget.allParents().includes(morph)) {
+            morph[expectedClick](this.bounds.origin);
+            if (this.inputTarget &&
+                !this.inputTarget.bounds.containsPoint(this.bounds.origin) &&
+                this.inputTarget.mouseLeave
+            ) {
+                this.inputTarget.mouseLeave();
+            }
+        }
     }
     this.mouseButton = null;
+    this.inputTarget = null;
+    this.clickTarget = null;
 };
 
 HandMorph.prototype.processDoubleClick = function () {
@@ -11641,12 +11645,14 @@ HandMorph.prototype.processMouseMove = function (event) {
     pos = new Point(
         event.pageX - posInDocument.x,
         event.pageY - posInDocument.y
-    );
+    ).divideBy(ZOOM);
 
     this.setPosition(pos);
 
     // determine the new mouse-over-list:
-    mouseOverNew = this.morphAtPointer().allParents();
+    mouseOverNew = this.morphAtPointer().allParents().concat(
+        this.inputTarget ? this.inputTarget.allParents() : []
+    );
     mouseOverBoundsNew = mouseOverNew.filter(m => m.isVisible &&
         m.visibleBounds().containsPoint(this.bounds.origin) &&
             !m.holes.some(any =>
@@ -11654,9 +11660,12 @@ HandMorph.prototype.processMouseMove = function (event) {
     );
 
     if (!this.children.length && this.mouseButton) {
-        topMorph = this.morphAtPointer();
+        topMorph = this.inputTarget || this.morphAtPointer();
         morph = topMorph.rootForGrab();
-        if (topMorph.mouseMove) {
+        if (this.clickTarget &&
+            this.clickTarget.allParents().includes(topMorph) &&
+            topMorph.mouseMove
+        ) {
             topMorph.mouseMove(pos, this.mouseButton);
             if (this.mouseButton === 'right') {
                 this.contextMenuEnabled = false;
@@ -11751,12 +11760,9 @@ HandMorph.prototype.processMouseScroll = function (event) {
     if (morph) {
         morph.mouseScroll(
             (event.detail / -3) || (
-                Object.prototype.hasOwnProperty.call(
-                    event,
-                    'wheelDeltaY'
-                ) ?
-                        event.wheelDeltaY / 120 :
-                        event.wheelDelta / 120
+                'wheelDeltaY' in event ?
+                    event.wheelDeltaY / 120 :
+                    event.wheelDelta / 120
             ),
             event.wheelDeltaX / 120 || 0
         );
@@ -11822,7 +11828,6 @@ HandMorph.prototype.processDrop = function (event) {
             trg.droppedSVG(pic, aFile.name);
             bulkDrop();
         };
-        frd = new FileReader();
         frd.onloadend = (e) => pic.src = e.target.result;
         frd.readAsDataURL(aFile);
     }
@@ -11862,7 +11867,6 @@ HandMorph.prototype.processDrop = function (event) {
             })();
         };
 
-        frd = new FileReader();
         frd.onloadend = (e) => pic.src = e.target.result;
         frd.readAsDataURL(aFile);
     }
@@ -12130,13 +12134,20 @@ WorldMorph.prototype.fullDrawOn = function (aContext, aRect) {
 };
 
 WorldMorph.prototype.updateBroken = function () {
-    var ctx = this.worldCanvas.getContext('2d');
+    var ctx = this.worldCanvas.getContext('2d'),
+        i;
     this.condenseDamages();
+    for (i = 0; i < 4; i += 1) { // kludge alert:
+        ctx.restore(); // make sure to hit rock-bottom scale
+    }
+    ctx.save();
+    ctx.scale(ZOOM, ZOOM);
     this.broken.forEach(rect => {
         if (rect.extent().gt(ZERO)) {
             this.fullDrawOn(ctx, rect);
         }
     });
+    ctx.restore();
     this.broken = [];
 };
 
@@ -12232,15 +12243,14 @@ WorldMorph.prototype.fillPage = function () {
     }
     if (this.worldCanvas.width !== clientWidth) {
         this.worldCanvas.width = clientWidth;
-        this.setWidth(clientWidth);
     }
     if (this.worldCanvas.height !== clientHeight) {
         this.worldCanvas.height = clientHeight;
-        this.setHeight(clientHeight);
     }
+    this.setExtent(new Point(clientWidth, clientHeight).divideBy(ZOOM));
     this.children.forEach(child => {
         if (child.reactToWorldResize) {
-            child.reactToWorldResize(this.bounds.copy());
+            child.reactToWorldResize(this.bounds);
         }
     });
 };
@@ -12254,6 +12264,11 @@ WorldMorph.prototype.initRetina = function () {
     this.worldCanvas.style.height = canvasHeight + 'px';
     this.worldCanvas.height = canvasHeight;
     this.setHeight(canvasHeight);
+};
+
+WorldMorph.prototype.zoom = function (factor = 1) {
+    ZOOM = Math.max(factor, 1);
+    this.fillPage();
 };
 
 // WorldMorph scheduling:
@@ -12273,6 +12288,33 @@ WorldMorph.prototype.schedule = function (callback, timeout) {
     );
     this.animations.push(schedule);
     return schedule;
+};
+
+WorldMorph.prototype.once = function (
+    conditionCallback,
+    actionCallback
+) {
+    // run a function - the actionCallback - once the given condition
+    // has been met, answer an Animation object
+    var condition = new Animation(
+        nop, // setter
+        nop, // getter
+        0, // delta
+        0, // duration msecs
+        nop, // easing
+        nop // onComplete
+    );
+
+    condition.step = function () {
+        if (!this.isActive) {return; }
+        if (conditionCallback()) {
+            this.isActive = false;
+            actionCallback();
+        }
+    };
+
+    this.animations.push(condition);
+    return condition;
 };
 
 // WorldMorph global pixel access:
@@ -12520,22 +12562,14 @@ WorldMorph.prototype.initEventListeners = function () {
         false
     );
 
-    window.cachedOnbeforeunload = window.onbeforeunload;
     this.onbeforeunloadListener = (evt) => {
-        if (!this.hasUnsavedEdits()) return;
-        if (window.cachedOnbeforeunload) {
-            window.cachedOnbeforeunload.call(null, evt);
+        if (this.hasUnsavedEdits() && !window.noExitWarning) {
+            evt.preventDefault();
+            // legacy browsers support
+            evt.returnValue = true;
         }
-        var e = evt || window.event,
-            msg = "Are you sure you want to leave?";
-        // For IE and Firefox
-        if (e) {
-            e.returnValue = msg;
-        }
-        // For Safari / chrome
-        return msg;
     };
-     window.addEventListener("beforeunload", this.onbeforeunloadListener);
+    window.addEventListener("beforeunload", this.onbeforeunloadListener);
 };
 
 WorldMorph.prototype.hasUnsavedEdits = function () {
@@ -12604,6 +12638,22 @@ WorldMorph.prototype.contextMenu = function () {
     if (this.isDevMode) {
         menu.addItem("demo...", 'userCreateMorph', 'sample morphs');
         menu.addLine();
+        menu.addItem(
+            "zoom...",
+            () => {
+                this.prompt(
+                    menu.title + '\nzoom:',
+                    num => this.zoom(num / 100),
+                    this,
+                    Math.round(ZOOM * 100).toString(),
+                    null,
+                    100,
+                    500,
+                    true
+                );
+            },
+            'set the global\nmagnification'
+        );
         menu.addItem("hide all...", 'hideAll');
         menu.addItem("show all...", 'showAllHiddens');
         menu.addItem(
