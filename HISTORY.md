@@ -2,6 +2,10 @@
 
 ## in development:
 
+### 2026-09-09
+* fixed #3572
+* shapes library: added type field to rounded rectangles
+
 ## 12.1.1:
 * **New Features:**
     * added 'scn_label(txt)' extension for programmatically setting the label of a tutorial window"
