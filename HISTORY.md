@@ -2,6 +2,9 @@
 
 ## in development:
 
+### 2026-09-10
+* cleaned up costumes
+
 ### 2026-09-09
 * fixed #3572
 * shapes library: added type field to rounded rectangles
