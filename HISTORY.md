@@ -2,8 +2,14 @@
 
 ## in development:
 
+## 12.1.2:
+* **Notable Fixes:**
+    * fixed dropdown menu of the "overlay" block's y-place slot in the shapes library
+    * cleaned up the costumes folder
+
 ### 2026-09-10
 * cleaned up costumes
+* prepared v12.1.2 patch
 
 ### 2026-09-09
 * fixed #3572
