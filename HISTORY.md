@@ -2,8 +2,13 @@
 
 ## in development:
 
+## 12.1.3:
+* **Notable Fixes:**
+    * fixed a visible stepping glitch when displaying intermediate custom reporter results
+
 ### 2026-09-10
 * threads: fixed a visible stepping glitch when displaying intermediate custom reporter results
+* prepared v12.1.3 patch
 
 ## 12.1.2:
 * **Notable Fixes:**
