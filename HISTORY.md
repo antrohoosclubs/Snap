@@ -2,6 +2,9 @@
 
 ## in development:
 
+### 2026-09-10
+* threads: fixed a visible stepping glitch when displaying intermediate custom reporter results
+
 ## 12.1.2:
 * **Notable Fixes:**
     * fixed dropdown menu of the "overlay" block's y-place slot in the shapes library
